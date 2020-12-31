@@ -2,7 +2,6 @@
 #include <linux/sched.h>
 #include <linux/sched/sysctl.h>
 #include <linux/sched/rt.h>
-#include <linux/sched/smt.h>
 #include <linux/sched/deadline.h>
 #include <linux/mutex.h>
 #include <linux/spinlock.h>
@@ -236,8 +235,6 @@ struct cfs_bandwidth {
 	/* statistics */
 	int nr_periods, nr_throttled;
 	u64 throttled_time;
-
-	bool distribute_running;
 #endif
 };
 
@@ -313,7 +310,7 @@ extern int tg_nop(struct task_group *tg, void *data);
 
 extern void free_fair_sched_group(struct task_group *tg);
 extern int alloc_fair_sched_group(struct task_group *tg, struct task_group *parent);
-extern void unregister_fair_sched_group(struct task_group *tg);
+extern void unregister_fair_sched_group(struct task_group *tg, int cpu);
 extern void init_tg_cfs_entry(struct task_group *tg, struct cfs_rq *cfs_rq,
 			struct sched_entity *se, int cpu,
 			struct sched_entity *parent);
@@ -482,6 +479,13 @@ struct rt_rq {
 	struct sched_rt_entity *curr;
 	atomic_long_t removed_util_avg;
 	atomic_long_t removed_load_avg;
+
+#ifdef HAVE_RT_PUSH_IPI
+	int push_flags;
+	int push_cpu;
+	struct irq_work push_work;
+	raw_spinlock_t push_lock;
+#endif
 #endif /* CONFIG_SMP */
 	int rt_queued;
 
@@ -569,19 +573,6 @@ struct root_domain {
 	struct dl_bw dl_bw;
 	struct cpudl cpudl;
 
-#ifdef HAVE_RT_PUSH_IPI
-	/*
-	 * For IPI pull requests, loop across the rto_mask.
-	 */
-	struct irq_work rto_push_work;
-	raw_spinlock_t rto_lock;
-	/* These are only updated and read within rto_lock */
-	int rto_loop;
-	int rto_cpu;
-	/* These atomics are updated outside of a lock */
-	atomic_t rto_loop_next;
-	atomic_t rto_loop_start;
-#endif
 	/*
 	 * The "RT overload" flag: it gets set if a CPU has more than
 	 * one runnable RT task.
@@ -591,12 +582,7 @@ struct root_domain {
 };
 
 extern struct root_domain def_root_domain;
-extern void sched_get_rd(struct root_domain *rd);
-extern void sched_put_rd(struct root_domain *rd);
 
-#ifdef HAVE_RT_PUSH_IPI
-extern void rto_push_irq_work_func(struct irq_work *work);
-#endif
 #endif /* CONFIG_SMP */
 
 /*
@@ -1088,6 +1074,7 @@ static inline u64 global_rt_runtime(void)
 	return (u64)sysctl_sched_rt_runtime * NSEC_PER_USEC;
 }
 
+#ifdef CONFIG_RT_GROUP_SCHED
 #define rt_entity_is_task(rt_se) (!(rt_se)->my_q)
 
 static inline struct task_struct *rt_task_of(struct sched_rt_entity *rt_se)
@@ -1097,6 +1084,7 @@ static inline struct task_struct *rt_task_of(struct sched_rt_entity *rt_se)
 #endif
 	return container_of(rt_se, struct task_struct, rt);
 }
+#endif /* CONFIG_RT_GROUP_SCHED */
 
 static inline int task_current(struct rq *rq, struct task_struct *p)
 {
@@ -1932,14 +1920,6 @@ static inline void cpufreq_trigger_update(u64 time) {}
 static inline void cpufreq_update_util(u64 time, unsigned long util, unsigned long max) {}
 static inline void cpufreq_trigger_update(u64 time) {}
 #endif /* CONFIG_CPU_FREQ */
-
-#ifdef arch_scale_freq_capacity
-#ifndef arch_scale_freq_invariant
-#define arch_scale_freq_invariant()	(true)
-#endif
-#else /* arch_scale_freq_capacity */
-#define arch_scale_freq_invariant()	(false)
-#endif
 
 static inline void account_reset_rq(struct rq *rq)
 {
